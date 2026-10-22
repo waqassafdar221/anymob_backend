@@ -93,9 +93,19 @@ async def register(data: Register, request: Request, response: Response, db: DB)
                     "address": data.shop_address,
                     "phone": data.phone,
                     "paymentMethods": ["cod"],
-                    "delivery": {"enabled": False, "fee": 0, "cities": [], "allPakistan": False},
-                    "pickup": {"enabled": True, "holdHours": 48},
-                    "policies": {"returnDays": 7},
+                    # The same defaults the store settings form starts from.
+                    "delivery": {
+                        "enabled": False,
+                        "fee": 0,
+                        "otherCityFee": 0,
+                        "freeAboveAmount": None,
+                        "cities": [],
+                        "allPakistan": False,
+                        "estimatedDays": {"ownCity": "1–2 days", "elsewhere": "3–5 days"},
+                        "defaultCourier": "TCS",
+                    },
+                    "pickup": {"enabled": True, "holdHours": 48, "instructions": ""},
+                    "policies": {"returnDays": 7, "returnText": "", "warrantyText": ""},
                     "storeSections": [],
                 },
             )
