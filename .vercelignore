@@ -1,0 +1,14 @@
+# Local secrets and environments must never be uploaded; production settings come from Vercel env vars.
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+*.egg-info
+tests
+Dockerfile
+.dockerignore
+compose.yaml
+Makefile

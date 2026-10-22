@@ -1,0 +1,14 @@
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+htmlcov/
+.coverage
+.data/
+.vercel
+.env*
+# Keep the documented example; every other env file stays local.
+!.env.example

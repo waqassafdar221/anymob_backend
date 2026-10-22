@@ -1,0 +1,45 @@
+name: Backend
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: anymob
+          POSTGRES_PASSWORD: anymob
+          POSTGRES_DB: anymob_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U anymob -d anymob_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ENVIRONMENT: test
+      SECRET_KEY: ci-test-only-secret-at-least-thirty-two-characters
+      DATABASE_URL: postgresql+asyncpg://anymob:anymob@localhost:5432/anymob_test
+      REDIS_URL: redis://localhost:6379/15
+      PAYMENT_PROVIDER: sandbox
+      PAYMENT_WEBHOOK_SECRET: test-webhook-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: pip install -r requirements.lock && pip install --no-deps -e .
+      - run: ruff check . && ruff format --check .
+      - run: alembic upgrade head && alembic check
+      - run: pytest -q
+      - run: alembic downgrade base && alembic upgrade head && alembic check
