@@ -14,22 +14,19 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("PAYMENT_PROVIDER", "sandbox")
 os.environ.setdefault("PAYMENT_WEBHOOK_SECRET", "test-webhook-secret")
 # Keep tests off any real mail server, bucket or proxy configured in a developer's .env.
-for key, value in {
-    "OUTBOX_INLINE": "false",
-    "PROXY_SECRET": "",
-    "SMTP_HOST": "localhost",
-    "SMTP_PORT": "1025",
-    "SMTP_USERNAME": "",
-    "SMTP_PASSWORD": "",
-    "SMTP_STARTTLS": "false",
-    "S3_ENDPOINT": "http://localhost:9000",
-    "S3_PUBLIC_ENDPOINT": "http://localhost:9000",
-    "S3_ACCESS_KEY": "anymob",
-    "S3_SECRET_KEY": "anymob-local-storage",
-    "S3_BUCKET": "anymob",
-    "S3_REGION": "us-east-1",
-}.items():
-    os.environ.setdefault(key, value)
+os.environ.setdefault("OUTBOX_INLINE", "false")
+os.environ.setdefault("PROXY_SECRET", "")
+os.environ.setdefault("SMTP_HOST", "localhost")
+os.environ.setdefault("SMTP_PORT", "1025")
+os.environ.setdefault("SMTP_USERNAME", "")
+os.environ.setdefault("SMTP_PASSWORD", "")
+os.environ.setdefault("SMTP_STARTTLS", "false")
+os.environ.setdefault("S3_ENDPOINT", "http://localhost:9000")
+os.environ.setdefault("S3_PUBLIC_ENDPOINT", "http://localhost:9000")
+os.environ.setdefault("S3_ACCESS_KEY", "anymob")
+os.environ.setdefault("S3_SECRET_KEY", "anymob-local-storage")
+os.environ.setdefault("S3_BUCKET", "anymob")
+os.environ.setdefault("S3_REGION", "us-east-1")
 
 from anymob.config import settings
 from anymob.db import Base, Session, engine, now, uid

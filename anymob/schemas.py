@@ -67,6 +67,10 @@ class MFAVerify(Input):
     challenge: str | None = None
 
 
+class MFAResend(Input):
+    challenge: str = Field(min_length=10, max_length=2000)
+
+
 class AddressInput(Input):
     label: Name = "Home"
     full_name: Name

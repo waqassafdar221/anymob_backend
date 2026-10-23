@@ -3,13 +3,21 @@ import secrets
 from datetime import timedelta
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import or_, select, update
 
 from anymob.common import DB, client_ip, config, digest, fail, record
 from anymob.db import now, uid
 from anymob.models import AuthSession, Challenge, Outbox, Shop, User
-from anymob.schemas import ChallengeRequest, ChallengeVerify, Login, MFAVerify, Register, phone_number
+from anymob.schemas import (
+    ChallengeRequest,
+    ChallengeVerify,
+    Login,
+    MFAResend,
+    MFAVerify,
+    Register,
+    phone_number,
+)
 from anymob.security import (
     Actor,
     check_origin,
@@ -42,9 +50,86 @@ async def find_user(db, identifier):
     return await db.scalar(select(User).where(or_(User.email == value, User.phone == value)))
 
 
+ADMIN_CODE_MINUTES = 10
+EXPIRED_SIGN_IN = "This sign-in has expired. Enter your password again."
+
+
+def pending_sign_in(token: str) -> dict:
+    """Claims of the token issued after the password step, or a clear message once it lapses."""
+    try:
+        return decode_token(token, "mfa")
+    except HTTPException:
+        fail(401, EXPIRED_SIGN_IN)
+
+
+def masked_email(email: str) -> str:
+    name, _, domain = email.partition("@")
+    return (name[:2] + "•" * max(1, len(name) - 2)) + "@" + domain
+
+
+async def send_admin_code(db, user, auth):
+    """Emails a fresh six-digit sign-in code for a pending admin session; earlier codes stop working."""
+    from anymob.config import settings
+
+    code = str(secrets.randbelow(1000000)).zfill(6)
+    identifier = "admin:" + auth.id
+    await db.execute(
+        update(Challenge)
+        .where(Challenge.identifier == identifier, Challenge.purpose == "admin_login")
+        .values(consumed=True)
+    )
+    db.add(
+        Challenge(
+            identifier=identifier,
+            purpose="admin_login",
+            token_hash=digest(code + settings().secret_key),
+            expires_at=now() + timedelta(minutes=ADMIN_CODE_MINUTES),
+        )
+    )
+    db.add(
+        Outbox(
+            kind="email",
+            payload={
+                "to": user.email,
+                "subject": "Your AnyMob admin sign-in code",
+                "body": (
+                    f"Your AnyMob Admin Console sign-in code is {code}. "
+                    f"It expires in {ADMIN_CODE_MINUTES} minutes.\n\n"
+                    "If you did not try to sign in, change your password now."
+                ),
+            },
+            event_key="admin-code:" + uid(),
+            available_at=now(),
+        )
+    )
+
+
+async def admin_challenge(db, user):
+    """Password accepted: hold the sign-in until the admin enters the code sent to their email."""
+    auth = AuthSession(
+        id=uid(),
+        user_id=user.id,
+        family_id=uid(),
+        token_hash=digest(secrets.token_urlsafe(48)),
+        expires_at=now() + timedelta(minutes=ADMIN_CODE_MINUTES),
+        mfa_verified=False,
+    )
+    db.add(auth)
+    await db.flush()
+    await send_admin_code(db, user, auth)
+    return {
+        "mfaRequired": True,
+        "method": "email",
+        "sentTo": masked_email(user.email),
+        "challenge": token_for(user, auth, "mfa", ADMIN_CODE_MINUTES),
+    }
+
+
 async def sign_in(db, user, response):
     if user.status != "active":
         fail(403, "This account is not active")
+    if user.role == "admin":
+        return await admin_challenge(db, user)
     if user.mfa_enabled:
         auth = AuthSession(
             id=uid(),
@@ -182,7 +267,9 @@ async def request_challenge(data: ChallengeRequest, request: Request, db: DB):
     if sms and settings().sms_provider == "disabled":
         fail(503, "SMS delivery has not been configured; use email")
     user = await find_user(db, data.identifier)
-    if user and user.status == "active":
+    # Admins sign in with their password and then an emailed code, never a code alone.
+    passwordless_admin = user is not None and user.role == "admin" and data.purpose == "login"
+    if user and user.status == "active" and not passwordless_admin:
         code = str(secrets.randbelow(1000000)).zfill(6)
         await db.execute(
             update(Challenge)
@@ -234,13 +321,18 @@ async def verify_challenge(data: ChallengeVerify, request: Request, response: Re
         await db.commit()
         fail(401, "Invalid or expired verification code")
     user = await find_user(db, data.identifier)
-    if not user or user.status != "active":
+    if not user or user.status != "active" or (user.role == "admin" and data.purpose == "login"):
         fail(401, "Invalid or expired verification code")
     if data.purpose == "reset":
         if not data.password:
             fail(422, "A new password is required")
         user.password_hash = hash_password(data.password)
         await db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=now()))
+        if user.role == "admin":
+            # Admins then sign in at the Admin Console with the new password and an emailed code.
+            user.is_verified = True
+            challenge.consumed = True
+            return {"passwordReset": True, "signInAt": "/admin/login"}
     user.is_verified = True
     challenge.consumed = True
     return await sign_in(db, user, response)
@@ -276,14 +368,61 @@ async def enable_mfa(data: MFAVerify, actor: Actor, request: Request, db: DB):
 
 @router.post("/mfa/verify")
 async def complete_mfa(data: MFAVerify, response: Response, db: DB):
-    claims = decode_token(data.challenge or "", "mfa")
+    claims = pending_sign_in(data.challenge or "")
     await throttle("mfa:" + claims["sub"], 5, 300)
     auth = await db.scalar(select(AuthSession).where(AuthSession.id == claims["sid"]).with_for_update())
     if not auth or auth.revoked_at or auth.expires_at <= now() or auth.user_id != claims["sub"]:
-        fail(401, "Challenge expired")
+        fail(401, EXPIRED_SIGN_IN)
     user = await db.get(User, auth.user_id)
-    if user.status != "active" or not user.mfa_enabled:
+    if user.status != "active" or (user.role != "admin" and not user.mfa_enabled):
         fail(403, "Account inactive")
-    await verify_totp(db, user, data.code)
+    if user.role == "admin":
+        await verify_admin_code(db, auth, data.code)
+    else:
+        await verify_totp(db, user, data.code)
     auth.revoked_at = now()
     return {"token": await create_session(db, user, response, mfa=True), "user": record(user)}
+
+
+async def verify_admin_code(db, auth, code: str):
+    from anymob.config import settings
+
+    challenge = await db.scalar(
+        select(Challenge)
+        .where(
+            Challenge.identifier == "admin:" + auth.id,
+            Challenge.purpose == "admin_login",
+            Challenge.consumed.is_(False),
+        )
+        .order_by(Challenge.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if not challenge or challenge.expires_at <= now() or challenge.attempts >= 5:
+        fail(401, "That code has expired. Send a new code to try again.")
+    challenge.attempts += 1
+    if not secrets.compare_digest(challenge.token_hash, digest(code + settings().secret_key)):
+        # Keep the attempt count even though the request fails.
+        await db.commit()
+        fail(401, "That code is not correct")
+    challenge.consumed = True
+
+
+@router.post("/mfa/resend")
+async def resend_admin_code(data: MFAResend, db: DB):
+    claims = pending_sign_in(data.challenge)
+    await throttle("admin-code:" + claims["sub"], 3, 600)
+    auth = await db.scalar(select(AuthSession).where(AuthSession.id == claims["sid"]).with_for_update())
+    if not auth or auth.revoked_at or auth.expires_at <= now() or auth.user_id != claims["sub"]:
+        fail(401, EXPIRED_SIGN_IN)
+    user = await db.get(User, auth.user_id)
+    if user.role != "admin" or user.status != "active":
+        fail(403, "Account inactive")
+    # The new code gets a full ten minutes, so the pending sign-in does too.
+    auth.expires_at = now() + timedelta(minutes=ADMIN_CODE_MINUTES)
+    await send_admin_code(db, user, auth)
+    return {
+        "method": "email",
+        "sentTo": masked_email(user.email),
+        "challenge": token_for(user, auth, "mfa", ADMIN_CODE_MINUTES),
+    }

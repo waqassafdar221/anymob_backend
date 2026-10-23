@@ -382,7 +382,9 @@ async def test_reports_group_and_audit_resolution(client, market):
     assert row["target"]["type"] == "product" and row["target"]["exists"] is False
     assert listed["counts"]["resolved"] >= 1 and listed["stats"]["resolved"] >= 1
     again = await client.post(
-        f"/api/v1/admin/reports/{id}/resolve", headers=headers, json={"action": "dismiss", "note": "Duplicate"}
+        f"/api/v1/admin/reports/{id}/resolve",
+        headers=headers,
+        json={"action": "dismiss", "note": "Duplicate"},
     )
     assert again.status_code == 409
     async with Session() as db:

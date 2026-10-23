@@ -35,15 +35,16 @@ async def test_csrf_cookie_and_auth_field_validation(client, market):
     assert (await client.get("/api/v1/auth/me")).status_code == 401
 
 
-async def test_real_mfa_enrollment_and_replay(client, market):
-    headers = market["admin"]["headers"]
+async def test_authenticator_enrollment_and_replay_for_members(client, market):
+    # Authenticator codes remain available to non-admin accounts; admins use emailed codes.
+    headers = market["vendor"]["headers"]
     setup = await client.post("/api/v1/auth/mfa/setup", headers=headers)
     assert setup.status_code == 200
     code = totp(setup.json()["secret"])
     enabled = await client.post("/api/v1/auth/mfa/enable", headers=headers, json={"code": code})
     assert enabled.status_code == 200
     login = await client.post(
-        "/api/v1/auth/login", json={"identifier": "admin@example.com", "password": "Secure-pass-123"}
+        "/api/v1/auth/login", json={"identifier": "vendor@example.com", "password": "Secure-pass-123"}
     )
     assert login.json()["mfaRequired"] is True
     challenge = login.json()["challenge"]
@@ -58,6 +59,56 @@ async def test_real_mfa_enrollment_and_replay(client, market):
     assert (
         await client.post("/api/v1/auth/mfa/verify", json={"challenge": challenge, "code": next_code})
     ).status_code == 401
+
+
+async def latest_admin_code():
+    import re
+
+    async with Session() as db:
+        mail = (
+            await db.scalars(
+                select(Outbox).where(Outbox.event_key.like("admin-code:%")).order_by(Outbox.created_at.desc())
+            )
+        ).first()
+    return mail.payload["to"], re.search(r"\b(\d{6})\b", mail.payload["body"]).group(1)
+
+
+async def test_admin_sign_in_requires_emailed_code(client, market):
+    login = await client.post(
+        "/api/v1/auth/login", json={"identifier": "admin@example.com", "password": "Secure-pass-123"}
+    )
+    body = login.json()
+    assert body["mfaRequired"] is True and body["method"] == "email" and "token" not in body
+    assert body["sentTo"].endswith("@example.com") and "admin@" not in body["sentTo"]
+    to, first = await latest_admin_code()
+    assert to == "admin@example.com"
+    verify = "/api/v1/auth/mfa/verify"
+    wrong = "111111" if first != "111111" else "222222"
+    assert (
+        await client.post(verify, json={"challenge": body["challenge"], "code": wrong})
+    ).status_code == 401
+
+    resent = await client.post("/api/v1/auth/mfa/resend", json={"challenge": body["challenge"]})
+    assert resent.status_code == 200, resent.text
+    _, second = await latest_admin_code()
+    challenge = resent.json()["challenge"]
+    if second != first:
+        # A resent code replaces the earlier one.
+        assert (await client.post(verify, json={"challenge": challenge, "code": first})).status_code == 401
+    verified = await client.post(verify, json={"challenge": challenge, "code": second})
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["user"]["role"] == "admin"
+    assert (await client.post(verify, json={"challenge": challenge, "code": second})).status_code == 401
+
+    # A code alone never signs an admin in.
+    async with Session() as db:
+        before = await db.scalar(select(func.count()).select_from(Outbox))
+    sent = await client.post(
+        "/api/v1/auth/challenge", json={"identifier": "admin@example.com", "purpose": "login"}
+    )
+    assert sent.status_code == 200
+    async with Session() as db:
+        assert await db.scalar(select(func.count()).select_from(Outbox)) == before
 
 
 async def test_email_code_attempts_persist_and_no_response_secret(client, market):
@@ -230,7 +281,9 @@ async def test_return_quantity_escalation_and_payout_hold(client, market):
     )
     assert ruled.status_code == 200, ruled.text
     body = ruled.json()
-    assert body["resolution"] == "buyer" and body["status"] == "refund_pending" and body["refundAmount"] == 1000
+    assert (
+        body["resolution"] == "buyer" and body["status"] == "refund_pending" and body["refundAmount"] == 1000
+    )
     again = await client.post(
         f"/api/v1/admin/returns/{id}/action",
         headers=admin,
@@ -257,9 +310,13 @@ async def test_admin_order_override_walks_forward(client, market):
     order = shipped.json()["order"]
     assert order["status"] == "shipped" and order["trackingNumber"] == "TCS123"
     assert [e["status"] for e in order["timeline"]][-3:] == ["confirmed", "packed", "shipped"]
-    assert (await client.post(path, headers=headers, json={"status": "packed", "note": "Go back"})).status_code == 409
+    assert (
+        await client.post(path, headers=headers, json={"status": "packed", "note": "Go back"})
+    ).status_code == 409
     noted = await client.post(
-        f"/api/v1/admin/orders/{id}/notes", headers=headers, json={"note": "Checked with buyer", "internal": True}
+        f"/api/v1/admin/orders/{id}/notes",
+        headers=headers,
+        json={"note": "Checked with buyer", "internal": True},
     )
     assert noted.status_code == 201 and noted.json()["notes"][0]["note"] == "Checked with buyer"
     listed = (await client.get("/api/v1/admin/orders", headers=headers)).json()["items"]
@@ -491,3 +548,35 @@ async def test_archived_parent_hides_catalog_and_search(client, market):
         (await db.get(Category, market["category"])).is_active = False
     assert (await client.get("/api/v1/products")).json()["total"] == 0
     assert (await client.get("/api/v1/search?q=Test")).json()["products"] == []
+
+
+async def test_admin_password_reset_returns_to_console_sign_in(client, market):
+    import re
+
+    sent = await client.post(
+        "/api/v1/auth/challenge", json={"identifier": "admin@example.com", "purpose": "reset"}
+    )
+    assert sent.status_code == 200
+    async with Session() as db:
+        mail = (
+            await db.scalars(
+                select(Outbox).where(Outbox.event_key.like("challenge:%")).order_by(Outbox.created_at.desc())
+            )
+        ).first()
+    code = re.search(r"\b(\d{6})\b", mail.payload["body"]).group(1)
+    reset = await client.post(
+        "/api/v1/auth/challenge/verify",
+        json={
+            "identifier": "admin@example.com",
+            "purpose": "reset",
+            "code": code,
+            "password": "New-secure-pass-456",
+        },
+    )
+    assert reset.status_code == 200, reset.text
+    assert reset.json() == {"passwordReset": True, "signInAt": "/admin/login"}
+    assert "anymob_access" not in reset.cookies
+    login = await client.post(
+        "/api/v1/auth/login", json={"identifier": "admin@example.com", "password": "New-secure-pass-456"}
+    )
+    assert login.json()["mfaRequired"] is True and login.json()["method"] == "email"

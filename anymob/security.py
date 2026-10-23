@@ -147,7 +147,8 @@ async def current_user(
         user.status, user.suspended_until = "active", None
     if user.status != "active":
         fail(403, "This account is suspended or banned")
-    if user.role == "admin" and user.mfa_enabled and not auth.mfa_verified:
+    # Admin sessions count only once the emailed sign-in code has been entered.
+    if user.role == "admin" and not auth.mfa_verified:
         fail(403, "Admin second-factor verification is required")
     request.state.user, request.state.session = user, auth
     return user
@@ -165,8 +166,6 @@ def permission(name: str | None = None):
     async def check(actor: Actor, db: DB):
         if actor.role != "admin":
             fail(403, "Admin access required")
-        if settings().environment == "production" and not actor.mfa_enabled:
-            fail(403, "Set up admin MFA before accessing administration")
         if name and not await has_permission(db, actor, name):
             fail(403, "Your role does not permit this action")
         return actor
