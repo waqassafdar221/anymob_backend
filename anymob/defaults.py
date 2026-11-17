@@ -30,8 +30,8 @@ EVENTS = [
 ]
 DEFAULTS = {
     "general": {
-        "siteName": "AnyMob",
-        "tagline": "Your mobile marketplace",
+        "siteName": "ANYMOB",
+        "tagline": "FIND YOUR NEXT DEVICE",
         "logo": "",
         "favicon": "",
         "contactEmail": "support@anymob.pk",
