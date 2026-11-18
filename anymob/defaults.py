@@ -35,7 +35,7 @@ DEFAULTS = {
         "logo": "",
         "favicon": "",
         "contactEmail": "support@anymob.pk",
-        "supportPhone": "",
+        "supportPhone": "+92 300 2836622",
         "defaultCity": "Lahore",
         "currencyFormat": "symbol",
     },
